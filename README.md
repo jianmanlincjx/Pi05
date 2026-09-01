@@ -148,25 +148,136 @@ Statistics must include `q01` and `q99`, since normalisation is `QUANTILES`.
 
 ---
 
-## Training
+## Training the baseline, end to end
+
+Verified path: `build_init.py` runs on CPU, the checkpoint it writes loads through
+`PI05Policy.from_pretrained`, and its VLM weights compare equal to the PaliGemma source
+tensor by tensor.
+
+### 0. Prerequisites
+
+About 85 GB of disk: 11 GB PaliGemma, 16 GB starting checkpoint, and 9.4 GB per saved
+checkpoint (six of them at the default `save_freq=5000` over 30k steps). Building the
+starting checkpoint on CPU needs roughly 20 GB of RAM; training needs ~50 GB per GPU with
+gradient checkpointing on.
+
+### 1. PaliGemma
+
+```bash
+huggingface-cli login                       # the repo is gated; accept the licence first
+huggingface-cli download google/paligemma-3b-pt-224 \
+    --local-dir ./checkpoints/paligemma-3b-pt-224
+```
+
+### 2. Starting checkpoint
+
+Set `--state-dim` and `--action-dim` to your robot's, and `--cameras` to how many you have.
+For a bimanual arm with both sides concatenated into one vector, that is 14 and 14.
+
+```bash
+python tools/build_init.py \
+    --paligemma  ./checkpoints/paligemma-3b-pt-224 \
+    --out        ./checkpoints/pi05_init \
+    --state-dim  14 \
+    --action-dim 14 \
+    --cameras    2
+```
+
+Expected output:
+
+```
+VLM tensors loaded 604, intentionally skipped 0 ([])
+  truncated model.language_model.embed_tokens.weight: 257216 -> 257152 rows
+left at random init: 693.4M parameters (action expert, projections, time MLP)
+```
+
+The truncation line is expected: the released vocabulary is padded to a multiple of 64 and
+lerobot builds 257152 rows, so the extra rows are padding and the rest line up one for one.
+
+### 3. Check the prompt before committing to a long run
+
+π0.5 writes the robot state into the language prompt, discretised into 256 bins over
+`[-1, 1]`. If the normalisation range is wrong the state saturates and the model is handed a
+constant — training still runs and the loss still falls, so this does not announce itself.
+
+```bash
+python - <<'PY'
+import torch
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.factory import make_pre_post_processors
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.utils.constants import OBS_LANGUAGE_TOKENS
+from transformers import AutoTokenizer
+
+CK   = "./checkpoints/pi05_init"
+REPO = "yourname/yam_pick_place"
+ROOT = "/data/yam_pick_place"
+
+cfg = PreTrainedConfig.from_pretrained(CK); cfg.pretrained_path = CK
+pre, _ = make_pre_post_processors(policy_cfg=cfg, pretrained_path=CK)
+ds = LeRobotDataset(REPO, root=ROOT)
+row = ds[0]
+batch = {k: v[None] for k, v in row.items() if isinstance(v, torch.Tensor)}
+batch["task"] = [row["task"]]
+ids = pre(batch)[OBS_LANGUAGE_TOKENS][0]
+print(AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224").decode(ids[ids != 0]))
+PY
+```
+
+You should see something like
+
+```
+<bos>Task: pick up the red block and place it in the bin, State: 89 109 235 236 135 151 245 8;\nAction:
+```
+
+Read the numbers. Values pinned at `0` or `255`, or a row of identical numbers, mean the
+state is outside `[-1, 1]` and the statistics need fixing before anything else.
+
+### 4. Train
 
 ```bash
 REPO_ID=yourname/yam_pick_place \
 DATA_ROOT=/data/yam_pick_place \
 INIT=./checkpoints/pi05_init \
 OUT=./outputs/pi05_baseline \
-CHUNK=10 NAS=10 EMPTY_CAMERAS=1 NPROC=8 BATCH=16 \
+CHUNK=10 NAS=10 EMPTY_CAMERAS=1 \
+NPROC=8 BATCH=16 STEPS=30000 LR=1e-4 \
 bash scripts/train_baseline.sh
 ```
 
-Roughly 26 h for 30k steps on 8×A800 at an effective batch of 128, about 50 GB per GPU with
-gradient checkpointing on.
+`EMPTY_CAMERAS` is `3 − (number of cameras)`: π0.5 always runs three image slots and fills
+the unused ones with a constant `-1` frame. `BATCH` is per process, so the effective batch is
+`NPROC × BATCH`.
 
-`scripts/train_stage1.sh` and `scripts/train_stage2.sh` run the two-stage method. Stage 2's
-three masking switches are the load-bearing part of that recipe and are documented in the
-script itself.
+Single GPU, for a smoke test:
 
----
+```bash
+NPROC=1 BATCH=4 STEPS=200 ... bash scripts/train_baseline.sh
+```
+
+### 5. What a healthy run looks like
+
+```
+step:50    loss:1.546  grdn:4.273
+step:500   loss:0.402
+step:2000  loss:0.174
+step:6000  loss:0.115
+```
+
+From this initialisation the loss starts near 1.5 and should be under 0.5 within a few
+hundred steps at `lr=1e-4`. **If it is flat, the data pipeline is wrong, not the model** —
+go back to step 3.
+
+Throughput on 8×A800 at an effective batch of 128 is about 3.2 s/step, so 30k steps is
+roughly 26 hours. Checkpoints land in
+`outputs/pi05_baseline/checkpoints/<step>/pretrained_model/`.
+
+### 6. Two-stage method
+
+`scripts/train_stage1.sh` then `scripts/train_stage2.sh`, with `STAGE1` pointing at Stage 1's
+`pretrained_model` directory. Stage 2's three masking switches are the load-bearing part of
+that recipe and are documented in the script. Unlike the baseline path above, these two have
+not been run end to end from this repo.
 
 ## Inference on the robot
 

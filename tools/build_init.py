@@ -44,6 +44,8 @@ def main() -> None:
     p.add_argument("--action-dim", type=int, default=7)
     p.add_argument("--cameras", type=int, default=2, help="how many real cameras the robot has")
     p.add_argument("--image-size", type=int, default=224)
+    p.add_argument("--device", default="cpu",
+                   help="where to build the fp32 model; cpu keeps a GPU free and needs ~20 GB RAM")
     a = p.parse_args()
 
     feats = {
@@ -57,6 +59,7 @@ def main() -> None:
         output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(a.action_dim,))},
         # pi05 always runs three image slots; the unused ones are fed a constant -1 frame.
         empty_cameras=max(0, 3 - a.cameras),
+        device=a.device,
     )
     policy = PI05Policy(cfg)
     vlm = policy.model.paligemma_with_expert.paligemma
@@ -71,7 +74,7 @@ def main() -> None:
         handles.setdefault(f, safe_open(base / f, framework="pt"))
         return handles[f].get_tensor(name)
 
-    loaded, skipped, missing = 0, [], []
+    loaded, skipped, missing, truncated = 0, [], [], []
     new_state = {}
     for k, t in target.items():
         c = ckpt_name(k)
@@ -81,12 +84,14 @@ def main() -> None:
             continue
         s = source(c)
         if tuple(s.shape) != tuple(t.shape):
-            # The token embedding is the one legitimate size difference: lerobot extends the
-            # vocabulary by the extra image token, so the released rows are a prefix of it.
-            if s.ndim == t.ndim and s.shape[1:] == t.shape[1:] and s.shape[0] <= t.shape[0]:
-                row = t.clone()
-                row[: s.shape[0]] = s.to(row.dtype)
-                new_state[k] = row
+            # The token embedding is the one legitimate size difference, and it goes the way
+            # round that is easy to get backwards: the released checkpoint pads the vocabulary
+            # to a multiple of 64 (257216 rows) while lerobot builds 257152, so the extra rows
+            # are padding and the first 257152 line up one for one. Truncate, never pad.
+            same_tail = s.ndim == t.ndim and s.shape[1:] == t.shape[1:]
+            if same_tail and s.shape[0] >= t.shape[0]:
+                new_state[k] = s[: t.shape[0]].to(t.dtype)
+                truncated.append((k, s.shape[0], t.shape[0]))
                 loaded += 1
                 continue
             raise SystemExit(f"shape mismatch {k}: policy {tuple(t.shape)} vs ckpt {tuple(s.shape)}")
@@ -95,8 +100,21 @@ def main() -> None:
 
     if missing:
         raise SystemExit(f"{len(missing)} policy tensors have no source, e.g. {missing[:3]}")
+
+    # lm_head is tied to the token embedding in the released checkpoint and so has no entry of
+    # its own. pi05 never runs it -- actions come out of action_out_proj -- but leaving it at
+    # random init writes half a gigabyte of noise into the file and makes a checkpoint that
+    # cannot be compared against the source. Tie it here as the source does.
+    emb_key = "model.language_model.embed_tokens.weight"
+    if "lm_head.weight" in target and emb_key in new_state:
+        new_state["lm_head.weight"] = new_state[emb_key].clone()
+        loaded += 1
+        skipped.remove("lm_head.weight") if "lm_head.weight" in skipped else None
+
     vlm.load_state_dict(new_state, strict=False)
     print(f"VLM tensors loaded {loaded}, intentionally skipped {len(skipped)} ({skipped})")
+    for k, had, want in truncated:
+        print(f"  truncated {k}: {had} -> {want} rows (released vocab is padded to a multiple of 64)")
 
     ae = sum(p.numel() for n, p in policy.named_parameters() if ".paligemma." not in n)
     print(f"left at random init: {ae/1e6:.1f}M parameters (action expert, projections, time MLP)")

@@ -25,14 +25,27 @@ init = safe_open(INIT, framework="pt")
 keys = list(init.keys())
 print(f"init checkpoint tensors: {len(keys)}")
 
+# save_pretrained keeps the policy's own naming, so keys carry a "model." prefix; an older
+# hand-built checkpoint did not. Accept either rather than silently matching nothing.
+PREFIXES = ("model.paligemma_with_expert.paligemma.", "paligemma_with_expert.paligemma.")
+
+
+def vlm_prefix(keys):
+    for p in PREFIXES:
+        if any(k.startswith(p) for k in keys):
+            return p
+    raise SystemExit("no VLM tensors found; is this a pi05 checkpoint?")
+
+
 def remap(k):
-    k = k[len("paligemma_with_expert.paligemma."):]
+    k = k[len(PREFIX):]
     if k.startswith("model.language_model."):  return "language_model.model." + k[len("model.language_model."):]
     if k.startswith(("model.vision_tower.", "model.multi_modal_projector.")): return k[len("model."):]
     return k
 
 # ---- 1. every VLM tensor must equal its source, value for value ----
-vlm_keys = [k for k in keys if k.startswith("paligemma_with_expert.paligemma.")]
+PREFIX = vlm_prefix(keys)
+vlm_keys = [k for k in keys if k.startswith(PREFIX)]
 checked = mismatch = trunc_ok = skipped = 0
 for k in vlm_keys:
     s = remap(k)
@@ -53,12 +66,13 @@ print(f"  tied (lm_head, checked below)   : {skipped}")
 print(f"  MISMATCHES                      : {mismatch}")
 
 # ---- 2. lm_head must equal the (truncated) embedding it is tied to ----
-lm = init.get_tensor("paligemma_with_expert.paligemma.lm_head.weight")
-emb = init.get_tensor("paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight")
+lm = init.get_tensor(PREFIX + "lm_head.weight")
+emb = init.get_tensor(PREFIX + "model.language_model.embed_tokens.weight")
 print(f"  lm_head == embed_tokens         : {torch.equal(lm, emb)}")
 
 # ---- 3. action expert must be random init, not from any checkpoint ----
-ae = [k for k in keys if k.startswith("paligemma_with_expert.gemma_expert.")]
+AE_PREFIX = PREFIX[: -len("paligemma.")] + "gemma_expert."
+ae = [k for k in keys if k.startswith(AE_PREFIX)]
 n = sum(init.get_tensor(k).numel() for k in ae)
 w = torch.cat([init.get_tensor(k).flatten().float() for k in ae if init.get_tensor(k).dim() == 2][:20])
 print(f"\n  action-expert tensors           : {len(ae)}  ({n/1e6:.1f}M params)")
