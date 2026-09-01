@@ -1,25 +1,21 @@
 # Pi05 — π0.5 baseline and goal-prior on LeRobot
 
 Training code for a π0.5 baseline and a two-stage goal-prior variant, built as a small
-package on top of upstream [LeRobot](https://github.com/huggingface/lerobot). Nothing in
-`lerobot/policies/pi05/` is patched, so **the baseline is stock π0.5** — this repo only adds
-a new policy type and one optional guard in the trainer.
+package on top of upstream [LeRobot](https://github.com/huggingface/lerobot). Nothing under
+`lerobot/policies/pi05/` is patched, so **the baseline is stock π0.5** — this repo only adds a
+new policy type and one optional guard in the trainer.
 
----
+Running the baseline needs none of the model code here. What it does need is the starting
+checkpoint, which this repo builds, and the dataset conventions, which it documents.
 
-## 快速开始（真机 baseline）
-
-只跑 baseline 的话不需要本仓库的模型代码，装好上游 lerobot 就够了；这里提供的是**初始化
-构造**、**启动脚本**和**接入自己数据集的适配步骤**。四步：
-
-1. 装 lerobot（见 Install）
-2. `tools/build_init.py` 造起点权重：PaliGemma VLM + 随机初始化的动作专家
-3. 把自己的数据转成 LeRobotDataset（见 Adapting to your robot）
-4. `scripts/train_baseline.sh` 起训练，`scripts/infer_realrobot.py` 上机
-
-关键一点：**起点不是 `pi05_base`**。`pi05_base` 是完整后训练过的 VLA，用它等于直接把动作
-先验送给模型；本文的两阶段方法要论证的正是这个先验能不能自己学出来，所以两边都从
-PaliGemma + 随机动作专家开始。
+```
+1.  install lerobot                       see Install
+2.  download PaliGemma                    see Weights
+3.  tools/build_init.py                   PaliGemma VLM + randomly initialised action expert
+4.  convert your data to LeRobotDataset   see docs/adapting_to_a_new_robot.md
+5.  scripts/train_baseline.sh             train
+6.  scripts/infer_realrobot.py            run it on the robot
+```
 
 ---
 
@@ -27,87 +23,128 @@ PaliGemma + 随机动作专家开始。
 
 ```bash
 git clone https://github.com/huggingface/lerobot.git
-cd lerobot && pip install -e ".[pi]"      # 0.6.2 / main
+cd lerobot && pip install -e ".[pi]"          # tested against 0.6.2 / main
 cd .. && git clone https://github.com/jianmanlincjx/Pi05.git
-cd Pi05 && pip install -e .               # registers policy.type=pi05_goal_prior
+cd Pi05 && pip install -e .                   # registers policy.type=pi05_goal_prior
 ```
 
-The goal-prior package imports lerobot's `pi05` and reuses its backbone, so the two versions
-must match. Pin lerobot to the commit you trained with.
+The goal-prior package imports lerobot's `pi05` and reuses its backbone, so the two must
+match — pin lerobot to the commit you trained with.
 
-Optional: `patches/lerobot_train.diff` adds a gradient-spike guard that skips an update when
-the pre-clip norm is non-finite or exceeds `GP_SKIP_GRAD_ABOVE` (default `1e5`). It never
-fired in any of our runs; apply it only if you see NaN losses.
+lerobot does not import third-party policy packages on its own, so run training and
+evaluation through `pi05gp-train` / `pi05gp-eval` (installed by `pip install -e .`), or
+`import pi05_goal_prior` before calling lerobot's own entry points. The baseline is plain
+`pi05` and needs neither.
 
 ---
 
-## Building the starting checkpoint
+## Weights
 
-`google/paligemma-3b-pt-224` is a gated repo — accept the licence on Hugging Face first.
+### 1. PaliGemma (required)
+
+The VLM the policy is initialised from.
+
+| | |
+| --- | --- |
+| repo | [`google/paligemma-3b-pt-224`](https://huggingface.co/google/paligemma-3b-pt-224) |
+| access | **gated** — accept the licence on the model page while signed in |
+| size | 11 GB, three safetensors shards plus an index |
+| files needed | `model-0000{1,2,3}-of-00003.safetensors`, `model.safetensors.index.json`, `config.json` |
+
+```bash
+huggingface-cli login
+huggingface-cli download google/paligemma-3b-pt-224 \
+    --local-dir ./checkpoints/paligemma-3b-pt-224
+```
+
+Behind the Great Firewall, `HF_ENDPOINT=https://hf-mirror.com` works for public repos but
+returns 403 for gated ones. Community re-uploads exist and are byte-size identical to Google's
+listing, but the mirror redacts the official sha256 for gated repos, so **their provenance
+cannot be checked from the mirror alone**. Accepting the licence on Hugging Face unmasks the
+official hashes, and a downloaded copy can be verified against them afterwards without
+re-downloading. Prefer the official repo.
+
+`pi05_base` is deliberately **not** used. It is a fully post-trained VLA, and loading it would
+hand the action expert exactly the prior Stage 1 exists to build — the comparison would then
+measure the donated prior rather than the method. Both the baseline and the two stages start
+from PaliGemma with a random action expert, which is also what the MolmoAct2 and FastWAM
+variants of this experiment do.
+
+### 2. The starting checkpoint (built locally)
 
 ```bash
 python tools/build_init.py \
-    --paligemma  /path/to/paligemma-3b-pt-224 \
-    --out        /path/to/pi05_init \
+    --paligemma  ./checkpoints/paligemma-3b-pt-224 \
+    --out        ./checkpoints/pi05_init \
     --state-dim  14 \
     --action-dim 14 \
     --cameras    2
-python tools/verify_init.py --init /path/to/pi05_init --paligemma /path/to/paligemma-3b-pt-224
+
+python tools/verify_init.py \
+    --init       ./checkpoints/pi05_init \
+    --paligemma  ./checkpoints/paligemma-3b-pt-224
 ```
 
 `build_init.py` fills only the `paligemma` submodule and leaves the action expert, the action
-projections and the time MLP at random init. It remaps keys from the transformers 4.x layout
-on disk to the 5.x layout lerobot builds, and shape-checks every tensor before writing.
+projections and the time MLP at random initialisation. It remaps keys from the transformers
+4.x layout on disk to the 5.x layout lerobot builds, and shape-checks every tensor before
+writing. `verify_init.py` then compares the result against the source value for value, rather
+than merely checking that something changed.
 
-The result is fp32 and about 16.5 GB. Training reads it once and runs in bf16.
+The result is fp32 and about **16 GB**. Training reads it once and runs in bf16.
+
+Layout written:
+
+```
+checkpoints/pi05_init/
+├── config.json                    input/output feature shapes, chunk size, empty_cameras
+├── model.safetensors              16 GB, fp32
+├── policy_preprocessor.json       normalisation + tokenizer pipeline
+├── policy_postprocessor.json
+├── tokenizer/
+└── train_config.json
+```
+
+### 3. Trained checkpoints
+
+Not distributed here. A finished run writes to `--output_dir`, one directory per
+`--save_freq` steps:
+
+```
+outputs/<job>/checkpoints/030000/pretrained_model/     ~9.4 GB in bf16
+```
+
+Point `--policy.path` at that `pretrained_model` directory for evaluation and for
+`scripts/infer_realrobot.py`.
 
 ---
 
 ## Adapting to your robot
 
-### Dataset
+Full detail in [`docs/adapting_to_a_new_robot.md`](docs/adapting_to_a_new_robot.md). The
+short version — π0.5 does not care about the joint count, the control mode, the camera
+resolution or the control rate. State and action are padded to 32 dimensions internally and
+images are resized with padding to 224×224.
 
-A standard `LeRobotDataset` with, per frame:
+It does care about four things, and each fails silently when wrong:
 
-| key | content |
-| --- | --- |
-| `observation.images.<name>` | one entry per camera, uint8 HWC or float CHW in `[0, 1]` |
-| `observation.state` | proprioception, any dimension ≤ 32 |
-| `action` | the commanded action, any dimension ≤ 32 |
-| `task` | the language instruction, as a string |
+| | requirement | what goes wrong otherwise |
+| --- | --- | --- |
+| state range | normalised into `[-1, 1]` | the state is discretised into 256 bins over `[-1, 1]` and written into the language prompt; out-of-range values saturate to bin 0 or 255 and the model is handed a constant |
+| image range | raw `[0, 1]`, `VISUAL: IDENTITY` | the policy rescales to `[-1, 1]` itself; pre-normalising applies the transform twice |
+| camera count | `empty_cameras = 3 − cameras` | π0.5 always runs three image slots; a wrong count feeds the model a constant frame it treats as real |
+| instruction | the same phrasing as training | the task string goes into the prompt verbatim; a model trained on a fixed set of instructions does not generalise past them |
 
-π0.5 pads state and action to 32 internally, so a bimanual 14-DoF arm needs no code change —
-only the right `shape` in `input_features` / `output_features`, which `build_init.py` writes
-into `config.json` for you.
-
-### Cameras
-
-π0.5 always runs three image slots. Set `EMPTY_CAMERAS = 3 - (number of cameras)`; the unused
-slots are filled with a constant `-1` frame and masked out of attention. Two cameras (one
-scene, one wrist) is what we used.
-
-Images are resized with padding to 224×224 and rescaled from `[0, 1]` to `[-1, 1]` inside the
-policy. **Do not pre-normalise them** and do not set `VISUAL` to anything but `IDENTITY`.
-
-### Normalisation
-
-Keep `{"ACTION": "QUANTILES", "STATE": "QUANTILES", "VISUAL": "IDENTITY"}`. π0.5 uses
-quantile normalisation for state and action, and it matters more than usual here: the policy
-**writes the state into the language prompt**, discretised into 256 bins over `[-1, 1]`:
+Dataset keys, per frame:
 
 ```
-Task: pick up the red block, State: 89 109 235 236 135 151 245 8;\nAction:
+observation.images.<name>    one per camera, uint8 HWC or float CHW in [0, 1]
+observation.state            proprioception, dimension ≤ 32
+action                       commanded action, dimension ≤ 32
+task                         the language instruction, as a string
 ```
 
-so the state must actually land in `[-1, 1]`. Your dataset statistics need `q01` and `q99`;
-`lerobot-dataset-stats` computes them.
-
-### Chunk size and control rate
-
-`chunk_size` is how many actions the model predicts, `n_action_steps` how many it executes
-before replanning. We train and run with both at 10. If your control rate is much higher than
-the demonstrations', predict a longer chunk and execute a prefix of it, but note that
-training then spends most of its loss on actions that are never executed.
+Statistics must include `q01` and `q99`, since normalisation is `QUANTILES`.
 
 ---
 
@@ -116,14 +153,18 @@ training then spends most of its loss on actions that are never executed.
 ```bash
 REPO_ID=yourname/yam_pick_place \
 DATA_ROOT=/data/yam_pick_place \
-INIT=/path/to/pi05_init \
+INIT=./checkpoints/pi05_init \
 OUT=./outputs/pi05_baseline \
 CHUNK=10 NAS=10 EMPTY_CAMERAS=1 NPROC=8 BATCH=16 \
 bash scripts/train_baseline.sh
 ```
 
-Roughly 26 h for 30k steps on 8×A800 at an effective batch of 128, ~50 GB per GPU with
+Roughly 26 h for 30k steps on 8×A800 at an effective batch of 128, about 50 GB per GPU with
 gradient checkpointing on.
+
+`scripts/train_stage1.sh` and `scripts/train_stage2.sh` run the two-stage method. Stage 2's
+three masking switches are the load-bearing part of that recipe and are documented in the
+script itself.
 
 ---
 
@@ -133,11 +174,11 @@ gradient checkpointing on.
 
 Two things that bite:
 
-- **`policy.reset()` once per episode.** The policy holds an action queue and refills it every
-  `n_action_steps`. Without a reset the new episode starts by replaying the tail of the old one.
-- **The instruction string must match training.** The task text goes into the prompt verbatim
-  after `strip()` and `_`→space; a model trained on a fixed set of instructions has no
-  robustness to rephrasing unless the dataset contained variety.
+- **Call `policy.reset()` once per episode.** The policy holds an action queue and refills it
+  every `n_action_steps`. Without a reset, a new episode begins by replaying the tail of the
+  previous one.
+- **The instruction string must match training.** It reaches the prompt verbatim after
+  `strip()` and `_`→space.
 
 ---
 
@@ -148,13 +189,16 @@ src/pi05_goal_prior/    the goal-prior policy (not needed for the baseline)
 scripts/                training and inference entry points
 tools/                  build and verify the starting checkpoint
 patches/                optional trainer guard
-docs/                   notes worth reading before trusting an evaluation
+docs/                   notes worth reading before trusting a result
 ```
 
-## Notes
+- [`docs/adapting_to_a_new_robot.md`](docs/adapting_to_a_new_robot.md) — what has to change
+  for a different embodiment, and the sanity checks to run before a long job.
+- [`docs/libero_plus_language_bug.md`](docs/libero_plus_language_bug.md) — LIBERO-Plus derives
+  the language instruction from the task file name, so the perturbation parameters reach the
+  policy as words. Only relevant if you evaluate on that benchmark, where it moves the numbers
+  a long way.
 
-- `docs/adapting_to_a_new_robot.md` — what actually has to change for a different embodiment,
-  and the four things that fail silently if they are wrong.
-- `docs/libero_plus_language_bug.md` — LIBERO-Plus derives the language instruction from the
-  task file name, so the perturbation parameters reach the policy as words. Only relevant if
-  you evaluate on that benchmark, but it changes the numbers a lot when it applies.
+`patches/lerobot_train.diff` adds a gradient-spike guard that skips an update when the
+pre-clip norm is non-finite or exceeds `GP_SKIP_GRAD_ABOVE` (default `1e5`). It never fired in
+any run reported here; apply it only if you hit NaN losses.
