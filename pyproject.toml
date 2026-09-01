@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi05-goal-prior"
+version = "0.1.0"
+description = "Two-stage goal-pose prior on pi05, as a LeRobot policy plugin"
+requires-python = ">=3.10"
+dependencies = ["lerobot"]
+
+[project.scripts]
+pi05gp-train = "pi05_goal_prior.cli:train"
+pi05gp-eval  = "pi05_goal_prior.cli:evaluate"
+
+[tool.setuptools.packages.find]
+where = ["src"]
