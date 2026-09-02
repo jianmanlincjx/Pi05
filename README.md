@@ -394,6 +394,6 @@ docs/                   notes worth reading before trusting a result
   policy as words. Only relevant if you evaluate on that benchmark, where it moves the numbers
   a long way.
 
-`patches/lerobot_train.diff` adds a gradient-spike guard that skips an update when the
-pre-clip norm is non-finite or exceeds `GP_SKIP_GRAD_ABOVE` (default `1e5`). It never fired in
-any run reported here; apply it only if you hit NaN losses.
+[`patches/README.md`](patches/README.md) carries an optional gradient-spike guard that skips an
+update when the pre-clip norm is non-finite or exceeds `GP_SKIP_GRAD_ABOVE` (default `1e5`). It
+never fired in any run reported here; apply it only if you hit NaN losses on your own data.
