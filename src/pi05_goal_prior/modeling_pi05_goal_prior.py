@@ -488,6 +488,15 @@ class PI05GoalPriorPytorch(PI05Pytorch):
             gp["semantic_mask"], gp["image_mask"] = sem, img
             k = v = None
 
+            if bool(getattr(self.config, "mask_language_from_action_expert", False)):
+                # The language block is the tail of the prefix; the action rows start at
+                # n_prefix. Their own columns are left alone.
+                att_4d = att_4d.clone()
+                if att_4d.shape[0] == 1:
+                    att_4d = att_4d.expand(bsize, -1, -1, -1).clone()
+                att_4d[:, :, n_prefix:, n_img:n_prefix] = NEG
+                gp["att_4d"] = att_4d
+
             if bool(getattr(self.config, "mask_image_from_action_expert", False)):
                 # Every sample, not a 30% quota: with the images permanently gone the
                 # latents are the only visual path, so there is nothing for them to lose
@@ -496,7 +505,7 @@ class PI05GoalPriorPytorch(PI05Pytorch):
                 # p_ref_only=0 would not have skipped it.
                 ref_keep = syn_keep = None
                 if n_img > 0:
-                    att_4d = att_4d.clone()
+                    att_4d = gp["att_4d"].clone()
                     if att_4d.shape[0] == 1:
                         att_4d = att_4d.expand(bsize, -1, -1, -1).clone()
                     att_4d[:, :, n_prefix:, :n_img] = NEG

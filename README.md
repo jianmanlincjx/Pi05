@@ -5,17 +5,32 @@ package on top of upstream [LeRobot](https://github.com/huggingface/lerobot). No
 `lerobot/policies/pi05/` is patched, so **the baseline is stock π0.5** — this repo only adds a
 new policy type and one optional guard in the trainer.
 
-Running the baseline needs none of the model code here. What it does need is the starting
-checkpoint, which this repo builds, and the dataset conventions, which it documents.
+There are two things you can train here, and they are not interchangeable:
+
+| | what it is | script |
+| --- | --- | --- |
+| **baseline** | stock π0.5, unmodified | `scripts/train_baseline.sh` |
+| **goal prior** | the two-stage method | `scripts/train_stage1.sh` → `scripts/train_stage2.sh` |
+
+For the goal prior, run **both** stages in order, and do not edit the three masking flags in
+`train_stage2.sh` — [Do not turn off the three switches](#do-not-turn-off-the-three-switches-in-stage-2)
+explains why a run with them off still trains, still converges, and is not the method. If you
+are reproducing the reported numbers, that section is the one to read before launching.
 
 ```
 1.  install lerobot                       see Install
 2.  download PaliGemma                    see Weights
 3.  tools/build_init.py                   PaliGemma VLM + randomly initialised action expert
 4.  convert your data to LeRobotDataset   see docs/adapting_to_a_new_robot.md
-5.  scripts/train_baseline.sh             train
-6.  scripts/infer_realrobot.py            run it on the robot
+5a. scripts/train_baseline.sh             baseline
+5b. scripts/train_stage1.sh, then         goal prior — both stages, in order
+    scripts/train_stage2.sh
+6.  tools/probe_latent_attention.py       goal prior only: confirm the latents are used
+7.  scripts/infer_realrobot.py            run it on the robot
 ```
+
+Running the baseline needs none of the model code here. What it does need is the starting
+checkpoint, which this repo builds, and the dataset conventions, which it documents.
 
 ---
 
@@ -274,10 +289,74 @@ roughly 26 hours. Checkpoints land in
 
 ### 6. Two-stage method
 
-`scripts/train_stage1.sh` then `scripts/train_stage2.sh`, with `STAGE1` pointing at Stage 1's
-`pretrained_model` directory. Stage 2's three masking switches are the load-bearing part of
-that recipe and are documented in the script. Unlike the baseline path above, these two have
-not been run end to end from this repo.
+Stage 1 builds a vision-free, goal-conditioned action prior; Stage 2 replaces the oracle goal
+with latents inferred from vision.
+
+```bash
+REPO_ID=yourname/yam_pick_place DATA_ROOT=/data/yam_pick_place \
+INIT=./checkpoints/pi05_init OUT=./outputs/stage1 \
+CHUNK=10 EMPTY_CAMERAS=1 NPROC=8 BATCH=64 \
+bash scripts/train_stage1.sh
+
+REPO_ID=yourname/yam_pick_place DATA_ROOT=/data/yam_pick_place \
+STAGE1=./outputs/stage1/checkpoints/020000/pretrained_model \
+OUT=./outputs/stage2 \
+CHUNK=10 EMPTY_CAMERAS=1 NPROC=7 BATCH=18 \
+bash scripts/train_stage2.sh
+```
+
+`STAGE1` must point at the `pretrained_model` directory, not at the step directory above it.
+
+#### Do not turn off the three switches in Stage 2
+
+`scripts/train_stage2.sh` is the configuration that produced the reported results, copied
+flag for flag from that run's `train_config.json`. Three of its flags decide whether the
+method does anything:
+
+```
+--policy.mask_image_from_action_expert=true
+--policy.mask_language_from_action_expert=true
+--policy.normalize_latent_keys=true
+```
+
+π0.5 runs the backbone and the action expert in **one shared attention**, and it writes the
+robot state into the language prompt as 256-way discretised text. Hiding the image columns
+therefore still leaves the action rows a complete fallback — the task text plus
+proprioception — and they take it. Measured on the trained checkpoints, action rows put
+
+| | latents | images | language + state | own action tokens |
+| --- | ---: | ---: | ---: | ---: |
+| images hidden only | 0.09% | 0.0% | 76.2% | 23.7% |
+| images and language hidden | **8.9%** | 0.0% | 0.0% | 91.1% |
+
+For scale, Stage 1's eight oracle goal tokens draw 12.7% — that is what a channel being used
+looks like in this architecture.
+
+Two earlier configurations differed from each other in chunk size, in the gate and in context
+dropout, and landed within 0.7 points of each other on LIBERO-Plus. Not because those choices
+are equivalent, but because in both of them the latents were ignored and the numbers came
+from something else. What moved them was masking the language columns:
+
+| | latent attention | clean LIBERO | LIBERO-Plus (libero_spatial) |
+| --- | ---: | ---: | ---: |
+| images hidden, chunk 50 | ~0.1% | 80.70 | 72.65 |
+| images hidden, chunk 10 | 0.09% | 83.10 | 72.0 |
+| **images + language hidden** | **8.9%** | **91.80** | **82.91** |
+
+A run with any of the three switches off will train, converge to a *lower* action loss than
+the full configuration, and report plausible numbers. It is not the method.
+
+#### Sanity check after training
+
+```bash
+python tools/probe_latent_attention.py \
+    --ckpt ./outputs/stage2/checkpoints/030000/pretrained_model \
+    --data /data/yam_pick_place
+```
+
+Expect the latents in the high single digits and the image and language columns at exactly
+zero. Latents near 0.1% mean a switch is off or the mask is landing on the wrong columns, and
+no amount of further training will fix it.
 
 ## Inference on the robot
 
@@ -298,11 +377,16 @@ Two things that bite:
 ```
 src/pi05_goal_prior/    the goal-prior policy (not needed for the baseline)
 scripts/                training and inference entry points
-tools/                  build and verify the starting checkpoint
+tools/                  build and verify the starting checkpoint; probe a trained one
 patches/                optional trainer guard
 docs/                   notes worth reading before trusting a result
 ```
 
+- [`tools/probe_latent_attention.py`](tools/probe_latent_attention.py) — the only check that
+  distinguishes a Stage 2 model that uses the latent interface from one that ignored it. The
+  loss curves do not: the model that ignores the latents reaches a *lower* action loss,
+  because reading the task text and proprioception straight out of the prompt is an easier
+  problem than reading a summary of the scene. Run it before trusting any Stage 2 result.
 - [`docs/adapting_to_a_new_robot.md`](docs/adapting_to_a_new_robot.md) — what has to change
   for a different embodiment, and the sanity checks to run before a long job.
 - [`docs/libero_plus_language_bug.md`](docs/libero_plus_language_bug.md) — LIBERO-Plus derives

@@ -7,7 +7,10 @@
 # oracle with latents inferred from vision.
 #
 # The goal pose is the state at t + chunk_size, read from the dataset. It is injected as extra
-# key/value columns visible only to the action rows, so the frozen VLM never sees it.
+# key/value columns visible only to the action rows, so the frozen VLM never sees it. The goal
+# horizon follows CHUNK -- target_pose_delta_index is left unset and the config resolves it to
+# chunk_size -- so changing CHUNK moves how far ahead the oracle points, not just how many
+# actions are predicted. Stage 2 inherits the resolved value from this checkpoint's config.
 set -euo pipefail
 
 REPO_ID="${REPO_ID:?}"

@@ -76,6 +76,13 @@ class PI05GoalPriorConfig(PI05Config):
     # measured at 38x by layer 17, with 0.09% of the action rows' attention reaching them.
     # MolmoAct2 has no such freedom -- its latent K/V share context_k_proj with the backbone.
     normalize_latent_keys: bool = False
+
+    # Hide the language/state columns from the action rows too, so the latents are the only
+    # route into the action expert. pi05 puts the discretised robot state in the language
+    # prompt, so masking images alone leaves the action rows a complete fallback -- measured
+    # at 66% of their attention on language and 0.5% on the latents. Never masks the action
+    # rows' own columns: that would cut the flow-matching self-attention.
+    mask_language_from_action_expert: bool = False
     gate_pose_tokens: bool = False
 
     # ---- Stage 2 channel regime (effective ratios, not nominal) ------------------------
