@@ -12,10 +12,10 @@ There are two things you can train here, and they are not interchangeable:
 | **baseline** | stock π0.5, unmodified | `scripts/train_baseline.sh` |
 | **goal prior** | the two-stage method | `scripts/train_stage1.sh` → `scripts/train_stage2.sh` |
 
-For the goal prior, run **both** stages in order, and do not edit the three masking flags in
-`train_stage2.sh` — [Do not turn off the three switches](#do-not-turn-off-the-three-switches-in-stage-2)
-explains why a run with them off still trains, still converges, and is not the method. If you
-are reproducing the reported numbers, that section is the one to read before launching.
+The goal prior is two runs in order, and it has its own self-contained walkthrough:
+[**Training the goal-prior version**](#training-the-goal-prior-version). Start there rather
+than assembling the flags yourself — the scripts are copied from the runs that produced the
+reported results, and several of their settings are part of the method rather than tuning.
 
 ```
 1.  install lerobot                       see Install
@@ -287,76 +287,116 @@ Throughput on 8×A800 at an effective batch of 128 is about 3.2 s/step, so 30k s
 roughly 26 hours. Checkpoints land in
 `outputs/pi05_baseline/checkpoints/<step>/pretrained_model/`.
 
-### 6. Two-stage method
+## Training the goal-prior version
 
-Stage 1 builds a vision-free, goal-conditioned action prior; Stage 2 replaces the oracle goal
-with latents inferred from vision.
+Two training runs, in order. Everything before this point is shared with the baseline — the
+same PaliGemma download, the same starting checkpoint from `tools/build_init.py`, the same
+dataset — so do the baseline walkthrough first and pick up here.
+
+### 0. Be on the current code
+
+The version that produced the reported results landed on 2 Sep 2026. A clone from before that
+carries an older `src/pi05_goal_prior/`, and `train_stage2.sh` will stop at argument parsing
+against it. Check before launching anything:
 
 ```bash
-REPO_ID=yourname/yam_pick_place DATA_ROOT=/data/yam_pick_place \
-INIT=./checkpoints/pi05_init OUT=./outputs/stage1 \
-CHUNK=10 EMPTY_CAMERAS=1 NPROC=8 BATCH=64 \
-bash scripts/train_stage1.sh
+git pull
+md5sum src/pi05_goal_prior/configuration_pi05_goal_prior.py   # macOS: md5 -q
+# 6f8c58c6f2ba3c50cd57fcd01f4e47c2
+pip install -e .        # re-register the policy type after pulling
+```
 
-REPO_ID=yourname/yam_pick_place DATA_ROOT=/data/yam_pick_place \
+If the md5 differs, you are not on the version these instructions describe.
+
+### 1. Stage 1 — goal-conditioned action prior
+
+Images are dropped and the VLM is frozen; the action expert learns to produce the trajectory
+that reaches a given goal pose, read from the dataset. Roughly 8 h on 8×A800.
+
+```bash
+REPO_ID=yourname/yam_pick_place \
+DATA_ROOT=/data/yam_pick_place \
+INIT=./checkpoints/pi05_init \
+OUT=./outputs/stage1 \
+CHUNK=10 EMPTY_CAMERAS=1 NPROC=8 BATCH=64 STEPS=20000 \
+bash scripts/train_stage1.sh
+```
+
+### 2. Stage 2 — replace the oracle with vision
+
+Vision comes back and everything trains. Roughly 26 h on 8×A800.
+
+```bash
+REPO_ID=yourname/yam_pick_place \
+DATA_ROOT=/data/yam_pick_place \
 STAGE1=./outputs/stage1/checkpoints/020000/pretrained_model \
 OUT=./outputs/stage2 \
-CHUNK=10 EMPTY_CAMERAS=1 NPROC=7 BATCH=18 \
+CHUNK=10 EMPTY_CAMERAS=1 NPROC=8 BATCH=16 STEPS=30000 \
 bash scripts/train_stage2.sh
 ```
 
-`STAGE1` must point at the `pretrained_model` directory, not at the step directory above it.
+`STAGE1` points at the `pretrained_model` directory, **not** at the `020000` directory above
+it. Stage 2 reads its architecture settings out of that checkpoint's config, so the two stages
+stay consistent without you repeating them on the command line.
 
-#### Do not turn off the three switches in Stage 2
+The final policy is `./outputs/stage2/checkpoints/030000/pretrained_model`. Run it with
+`scripts/infer_realrobot.py` exactly like a baseline checkpoint — nothing about deployment
+differs.
 
-`scripts/train_stage2.sh` is the configuration that produced the reported results, copied
-flag for flag from that run's `train_config.json`. Three of its flags decide whether the
-method does anything:
+### 3. Settings
 
-```
---policy.mask_image_from_action_expert=true
---policy.mask_language_from_action_expert=true
---policy.normalize_latent_keys=true
-```
+`train_stage1.sh` and `train_stage2.sh` are the configurations that produced the reported
+results, copied flag for flag from those runs. Everything not listed is the code default.
 
-π0.5 runs the backbone and the action expert in **one shared attention**, and it writes the
-robot state into the language prompt as 256-way discretised text. Hiding the image columns
-therefore still leaves the action rows a complete fallback — the task text plus
-proprioception — and they take it. Measured on the trained checkpoints, action rows put
+| | Stage 1 | Stage 2 |
+| --- | --- | --- |
+| `goal_prior_stage` | `stage1` | `stage2` |
+| `train_expert_only` | `true` | — (everything trains) |
+| `chunk_size` / `n_action_steps` | 10 / 10 | 10 / 10 |
+| `empty_cameras` | 1 | 1 |
+| `optimizer_lr` | 1e-4 | 1e-4 |
+| `aggregator_optimizer_lr` | — | 1e-4 |
+| warmup / decay | 4000 / 20000 | 5000 / 30000 |
+| steps | 20000 | 30000 |
+| batch (per process) | 64 | 16 (reported run: 18) |
+| seed | 1000 | 1000 |
+| `mask_image_from_action_expert` | — | `true` |
+| `mask_language_from_action_expert` | — | `true` |
+| `normalize_latent_keys` | — | `true` |
+| `use_syn_gate` | default (`true`) | `false` |
+| `context_token_dropout` / `context_blackout_prob` | — | 0.0 / 0.0 |
+| `num_semantic_visual_tokens` | — | 100 (default) |
+| `num_semantic_visual_pose_tokens` | 8 (default) | 8 (default) |
+| `semantic_visual_num_layer_groups` | — | 6 (default) |
+| `pose_recon_loss_weight` | — | 0.3 (default) |
 
-| | latents | images | language + state | own action tokens |
-| --- | ---: | ---: | ---: | ---: |
-| images hidden only | 0.09% | 0.0% | 76.2% | 23.7% |
-| images and language hidden | **8.9%** | 0.0% | 0.0% | 91.1% |
+Three notes on that table:
 
-For scale, Stage 1's eight oracle goal tokens draw 12.7% — that is what a channel being used
-looks like in this architecture.
+- **Leave the four Stage 2 switches as the script sets them.** `mask_image_from_action_expert`,
+  `mask_language_from_action_expert`, `normalize_latent_keys` and `use_syn_gate=false` are part
+  of the method, not tuning knobs. A run with any of them changed still trains and still
+  converges — to a *lower* loss, in fact — but it is a different and weaker model, and the loss
+  curve will not tell you that. If you want to ablate them, do it as a labelled experiment, not
+  by editing the script.
+- **`CHUNK` moves two things.** The goal pose is the state at `t + chunk_size`, so changing
+  `CHUNK` changes how far ahead the goal sits as well as how many actions are predicted. Use the
+  same value in both stages.
+- **`BATCH` is per process.** Stage 1 ran at 64 × 8 = 512. Stage 2 ran at 18 × 7 = 126 — seven
+  processes only because one GPU on that node was faulty, not by design. The script therefore
+  defaults to `NPROC=8 BATCH=16` = 128, which is the same effective batch on a healthy node.
 
-Two earlier configurations differed from each other in chunk size, in the gate and in context
-dropout, and landed within 0.7 points of each other on LIBERO-Plus. Not because those choices
-are equivalent, but because in both of them the latents were ignored and the numbers came
-from something else. What moved them was masking the language columns:
-
-| | latent attention | clean LIBERO | LIBERO-Plus (libero_spatial) |
-| --- | ---: | ---: | ---: |
-| images hidden, chunk 50 | ~0.1% | 80.70 | 72.65 |
-| images hidden, chunk 10 | 0.09% | 83.10 | 72.0 |
-| **images + language hidden** | **8.9%** | **91.80** | **82.91** |
-
-A run with any of the three switches off will train, converge to a *lower* action loss than
-the full configuration, and report plausible numbers. It is not the method.
-
-#### Sanity check after training
+### 4. Optional check after Stage 2
 
 ```bash
 python tools/probe_latent_attention.py \
     --ckpt ./outputs/stage2/checkpoints/030000/pretrained_model \
+    --repo-id yourname/yam_pick_place \
     --data /data/yam_pick_place
 ```
 
-Expect the latents in the high single digits and the image and language columns at exactly
-zero. Latents near 0.1% mean a switch is off or the mask is landing on the wrong columns, and
-no amount of further training will fix it.
+Reports how much the action expert is actually using the latent interface. A healthy Stage 2
+lands in the high single digits; a result near zero means one of the four switches was changed,
+and more training will not recover it.
 
 ## Inference on the robot
 
@@ -382,11 +422,9 @@ patches/                optional trainer guard
 docs/                   notes worth reading before trusting a result
 ```
 
-- [`tools/probe_latent_attention.py`](tools/probe_latent_attention.py) — the only check that
-  distinguishes a Stage 2 model that uses the latent interface from one that ignored it. The
-  loss curves do not: the model that ignores the latents reaches a *lower* action loss,
-  because reading the task text and proprioception straight out of the prompt is an easier
-  problem than reading a summary of the scene. Run it before trusting any Stage 2 result.
+- [`tools/probe_latent_attention.py`](tools/probe_latent_attention.py) — reports whether a
+  trained Stage 2 model is really using the latent interface. Worth running once, because the
+  loss curve looks fine either way.
 - [`docs/adapting_to_a_new_robot.md`](docs/adapting_to_a_new_robot.md) — what has to change
   for a different embodiment, and the sanity checks to run before a long job.
 - [`docs/libero_plus_language_bug.md`](docs/libero_plus_language_bug.md) — LIBERO-Plus derives

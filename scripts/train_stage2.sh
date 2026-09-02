@@ -1,37 +1,34 @@
 #!/usr/bin/env bash
 # Stage 2: the oracle retires and learnable latents take its slot.
 #
-# THIS IS THE CONFIGURATION THAT PRODUCED THE REPORTED RESULTS. Every flag below is copied
-# from the train_config.json of that run. Three of them decide whether the mechanism runs at
-# all, and two earlier configurations that differed only in those three landed within 0.7
-# points of each other on LIBERO-Plus -- because in both of them the action expert ignored
-# the latents entirely and was reading the language prompt instead.
+# This is the configuration that produced the reported results -- every flag below is copied
+# from that run's train_config.json. See "Training the goal-prior version" in the README.
 #
-#   mask_image_from_action_expert     hide the image columns from the action rows
-#   mask_language_from_action_expert  hide the language/state columns as well
-#   normalize_latent_keys             rescale injected keys to the backbone key norm
+# Four of these flags are part of the method, not tuning knobs:
 #
-# pi05 runs the backbone and the action expert in ONE shared attention, and writes the robot
-# state into the language prompt as 256-way discretised text. Hiding images alone therefore
-# leaves the action rows a complete fallback -- task text plus proprioception -- and they
-# take it: 66% of their attention on language, 0.5% on the 100 latents. Hiding language too
-# removes the fallback, and the latents then draw ~9%, against 12.7% for the Stage 1 oracle
-# channel. Measured effect of that one switch: latent attention 0.09% -> 8.9%, clean LIBERO
-# 83.10 -> 91.80, LIBERO-Plus on libero_spatial 72.0 -> 82.91.
+#   mask_image_from_action_expert=true
+#   mask_language_from_action_expert=true
+#   normalize_latent_keys=true
+#   use_syn_gate=false
 #
-# Turning any of the three off reproduces a version whose numbers look plausible and whose
-# mechanism does nothing. Do not "simplify" them away.
+# A run with any of them changed still trains and still converges -- to a lower loss, in fact
+# -- but it is a different and weaker model, and nothing in the loss curve says so. Two earlier
+# configurations that differed only in these landed within 0.7 points of each other on
+# LIBERO-Plus, then jumped 10 points once they were all set as above. Ablate them as labelled
+# experiments if you want to; do not quietly edit them here.
 set -euo pipefail
 
 REPO_ID="${REPO_ID:?}"
 DATA_ROOT="${DATA_ROOT:?}"
-STAGE1="${STAGE1:?path to the stage 1 checkpoint's pretrained_model directory}"
+STAGE1="${STAGE1:?path to the stage 1 pretrained_model directory}"
 OUT="${OUT:-./outputs/stage2}"
 CHUNK="${CHUNK:-10}"
 EMPTY_CAMERAS="${EMPTY_CAMERAS:-1}"
 STEPS="${STEPS:-30000}"
-BATCH="${BATCH:-18}"
-NPROC="${NPROC:-7}"
+# The reported run was 18 x 7 = 126: seven processes only because one GPU on that node was
+# faulty. 16 x 8 = 128 is the closest effective batch on a healthy eight-GPU node.
+BATCH="${BATCH:-16}"
+NPROC="${NPROC:-8}"
 
 accelerate launch --num_processes="$NPROC" -m pi05_goal_prior.cli \
   --dataset.repo_id="$REPO_ID" --dataset.root="$DATA_ROOT" \
