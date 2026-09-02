@@ -412,6 +412,19 @@ Two things that bite:
 
 ---
 
+## If a run dies at the first save
+
+`draccus.encode() takes 1 positional argument but 2 were given`, thrown at the first
+checkpoint, means the environment has draccus 0.10.0. lerobot pins `draccus>=0.11.6,<0.12.0`,
+so a clean `pip install -e ".[pi]"` gets a working version and you will not see this — it only
+happens when lerobot is run inside a virtualenv built for something else. Training runs
+normally right up to the save, so the job can burn hours before failing:
+
+```bash
+python -c "import draccus, importlib.metadata as m; print(m.version('draccus'))"
+pip install "draccus>=0.11.6,<0.12.0"
+```
+
 ## Repository layout
 
 ```
