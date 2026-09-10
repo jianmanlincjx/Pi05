@@ -57,6 +57,20 @@ like `... view 0 0 100 2 352 initstate 0`. See
 [`docs/libero_plus_language_bug.md`](docs/libero_plus_language_bug.md); numbers produced
 without the fix are not comparable.
 
+## Verified on a fresh machine
+
+2026-09-10. Base: **upstream LeRobot 0.6.2** with this package on `PYTHONPATH` (or `pip install -e .`).
+Both released checkpoints load directly with `lerobot_eval` and roll out (2/2 on `libero_spatial` task 0
+each) — `config.json` carries `"type": "pi05"` for the baseline and `"type": "pi05_goal_prior"` for LIT,
+and importing `pi05_goal_prior` is what registers the latter. Do not also have a LeRobot tree that already
+bundles `lerobot/policies/pi05_goal_prior` on the path: the type would be registered twice.
+
+```bash
+python -m lerobot.scripts.lerobot_eval --policy.path=<ckpt_dir> --policy.device=cuda   --env.type=libero --env.task=libero_spatial --env.task_ids="[0]" --eval.n_episodes=2 --eval.batch_size=1 --seed=1000
+```
+
+(`lerobot_eval` in LeRobot 0.6.2 has no `--eval.max_episodes_rendered`; videos are written by default.)
+
 ## Checking the latents are actually used
 
 ```bash
