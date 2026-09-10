@@ -82,9 +82,8 @@ almost nothing through the latents, and the method degrades to the baseline.
 
 ## Checkpoints
 
-`paper_ckpt/pi05/` — `baseline_030000`, `lit_stage1_020000`, `lit_stage2_030000`. Each is a
-self-contained LeRobot `pretrained_model` directory (`model.safetensors`, `config.json`,
-`train_config.json`, tokenizer, normaliser tensors).
+Released as `pi05/baseline`, `pi05/lit_stage1` and `pi05/lit_stage2` (Hugging Face, link in the LIT hub);
+each is a LeRobot policy directory for `--policy.path`. `lit_stage2` is the model in the tables.
 
 ## The same method on other backbones
 
