@@ -82,7 +82,7 @@ almost nothing through the latents, and the method degrades to the baseline.
 
 ## Checkpoints
 
-Released as `pi05/baseline`, `pi05/lit_stage1` and `pi05/lit_stage2` (Hugging Face, link in the LIT hub);
+Released as `pi05/baseline`, `pi05/lit_stage1` and `pi05/lit_stage2` (https://huggingface.co/linjianman/LIT);
 each is a LeRobot policy directory for `--policy.path`. `lit_stage2` is the model in the tables.
 
 ## The same method on other backbones
