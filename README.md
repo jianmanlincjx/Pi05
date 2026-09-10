@@ -2,98 +2,100 @@
 
 The **Latent Interface Training (LIT)** instantiation of *Breaking the Vision–Action Shortcut: Latent
 Interface Training for Generalizable Robot Foundation Models* on π0.5.
-Cross-framework hub, project page and released checkpoints: https://github.com/jianmanlincjx/LIT ·
-https://jianmanlincjx.github.io/LIT/ · https://huggingface.co/linjianman/LIT
+Hub, project page, checkpoints: https://github.com/jianmanlincjx/LIT · https://jianmanlincjx.github.io/LIT/ ·
+https://huggingface.co/linjianman/LIT
 
-This is a fork of [π0.5](https://github.com/huggingface/lerobot); the original README is kept as [`README_upstream.md`](./README_upstream.md)
-(installation of the base framework lives there). Everything below is what this fork adds.
-
-
-`README.md` covers installation, weights, and the three training scripts. This page adds the
-evaluation protocols and says which checkpoint produced which reported number.
-
-## Training
-
-Two things, not interchangeable (see `README.md` for the full walkthrough):
+A small package on top of **upstream [LeRobot](https://github.com/huggingface/lerobot) 0.6.2**. Nothing under
+`lerobot/policies/pi05/` is patched — the baseline is stock π0.5 — this repository only adds the
+`pi05_goal_prior` policy type. The earlier long-form README is kept as [`README_upstream.md`](./README_upstream.md)
+(PaliGemma download, `build_init.py`, per-script details).
 
 ```bash
-scripts/train_baseline.sh                        # stock pi0.5, unmodified
-scripts/train_stage1.sh && scripts/train_stage2.sh   # LIT, both stages in order
+pip install lerobot==0.6.2
+git clone https://github.com/jianmanlincjx/Pi05.git && pip install -e Pi05    # registers --policy.type=pi05_goal_prior
 ```
 
-- **Stage 1** — language + robot state + each chunk's terminal SE(3) end-effector pose,
-  no image observations. 20,000 steps, batch 64, lr 1e-4, warmup 4,000.
-- **Stage 2** — vision restored, but only through 100 learnable latents that aggregate the
-  backbone; raw visual tokens are masked out of the action expert and 8 latents reconstruct
-  the same pose (`lambda_pose = 0.3`). 30,000 steps, batch 16, lr 1e-4, warmup 5,000.
+Every LIBERO-Plus number was produced with **`LIBERO_PLUS_FIX_LANG=1`** (see
+[`docs/libero_plus_language_bug.md`](docs/libero_plus_language_bug.md)); Overall is the mean over the seven
+perturbation axes.
 
-Stage 1's SE(3) encoder is training-time scaffolding: Stage 2 drops it and the latents
-predict the pose from vision, so no privileged input is needed at inference.
+---
 
-**pi0.5-specific.** The other backbones inject the latents as cross-attention KV. pi0.5 is a
-MoT with shared self-attention, so the action expert can read language and state directly and
-bypass the interface entirely — measured at 66% of its attention on language and 0.5% on the
-latents. `mask_language_from_action_expert` hides the language and state columns from the
-action rows, making the latents the only route in. It never masks the action rows' own
-columns, which would cut the flow-matching self-attention. This is part of the method on
-pi0.5, not tuning.
-
-## Evaluation
-
-### LIBERO (in-distribution)
-
-Official protocol: 50 episodes per task, official horizons, 4 suites x 10 tasks = 2,000 episodes.
+## 1. Evaluate the released checkpoint
 
 ```bash
-pi05gp-eval --policy.path=<run>/checkpoints/030000/pretrained_model \
-            --env.type=libero --eval.n_episodes=50 --seed=1000
+hf download linjianman/LIT --include "pi05/*" --local-dir ./LIT_ckpt
+CK=./LIT_ckpt/pi05/lit_stage2         # LeRobot policy dir; config.json says "type": "pi05_goal_prior"
 ```
 
-### LIBERO-Plus (out of distribution)
-
-[LIBERO-Plus](https://github.com/sylvestf/LIBERO-plus) is 10,030 perturbed tasks over seven
-axes, one episode each.
+`lerobot_eval` loads it directly (importing `pi05_goal_prior` — which `pi05gp-eval` does for you — is what
+registers the type):
 
 ```bash
+# LIBERO, official protocol: 50 episodes per task, 4 suites x 10 tasks = 2,000 episodes
+pi05gp-eval --policy.path="$CK" --env.type=libero --eval.n_episodes=50 --seed=1000
+
+# LIBERO-Plus: 10,030 perturbed tasks, one episode each
 LIBERO_PLUS_FIX_LANG=1 \
-pi05gp-eval --policy.path=<run>/checkpoints/030000/pretrained_model \
-            --env.type=libero_plus --eval.n_episodes=1 --eval.batch_size=1 --seed=1000
+pi05gp-eval --policy.path="$CK" --env.type=libero_plus --eval.n_episodes=1 --eval.batch_size=1 --seed=1000
 ```
 
-**`LIBERO_PLUS_FIX_LANG=1` is required.** Upstream LIBERO-Plus derives the instruction from
-the perturbed file name, so on every non-language axis the policy is otherwise fed strings
-like `... view 0 0 100 2 352 initstate 0`. See
-[`docs/libero_plus_language_bug.md`](docs/libero_plus_language_bug.md); numbers produced
-without the fix are not comparable.
-
-## Verified on a fresh machine
-
-2026-09-10. Base: **upstream LeRobot 0.6.2** with this package on `PYTHONPATH` (or `pip install -e .`).
-Both released checkpoints load directly with `lerobot_eval` and roll out (2/2 on `libero_spatial` task 0
-each) — `config.json` carries `"type": "pi05"` for the baseline and `"type": "pi05_goal_prior"` for LIT,
-and importing `pi05_goal_prior` is what registers the latter. Do not also have a LeRobot tree that already
-bundles `lerobot/policies/pi05_goal_prior` on the path: the type would be registered twice.
+Quick check (one task, two episodes, ~20 s):
 
 ```bash
-python -m lerobot.scripts.lerobot_eval --policy.path=<ckpt_dir> --policy.device=cuda   --env.type=libero --env.task=libero_spatial --env.task_ids="[0]" --eval.n_episodes=2 --eval.batch_size=1 --seed=1000
+python -m lerobot.scripts.lerobot_eval --policy.path="$CK" --policy.device=cuda \
+  --env.type=libero --env.task=libero_spatial --env.task_ids="[0]" --eval.n_episodes=2 --eval.batch_size=1 --seed=1000
 ```
 
-(`lerobot_eval` in LeRobot 0.6.2 has no `--eval.max_episodes_rendered`; videos are written by default.)
+Verified on a fresh machine on 2026-09-10: the baseline (`"type": "pi05"`) and LIT checkpoints both load
+and roll out 2/2. Do not put a LeRobot tree that already bundles `lerobot/policies/pi05_goal_prior` on the
+path at the same time — the type would be registered twice.
 
-## Checking the latents are actually used
+---
+
+## 2. Train, then evaluate
+
+**What you need** — the VLM the policy starts from, and the initial checkpoint built from it:
 
 ```bash
-python tools/probe_latent_attention.py --policy.path=<stage2>/pretrained_model
+hf download google/paligemma-3b-pt-224 --local-dir ./checkpoints/paligemma-3b-pt-224   # gated: accept the licence first
+python tools/build_init.py  --paligemma ./checkpoints/paligemma-3b-pt-224 --out ./checkpoints/pi05_init \
+                            --state-dim 14 --action-dim 14 --cameras 2
+python tools/verify_init.py --init ./checkpoints/pi05_init --paligemma ./checkpoints/paligemma-3b-pt-224
 ```
 
-On pi0.5 this is worth running: without the language/state mask the action expert routes
-almost nothing through the latents, and the method degrades to the baseline.
+`pi05_base` (the fully post-trained VLA) is deliberately **not** used: it would hand the action expert exactly
+the prior Stage 1 exists to build. Baseline and both stages start from PaliGemma with a random action
+expert, as on the other backbones. Data: LIBERO in LeRobot format, all four suites, `no_noops`.
 
-## Checkpoints
+```bash
+bash scripts/train_baseline.sh    # stock pi05, 30K steps
+bash scripts/train_stage1.sh      # Stage 1: language + state + chunk-end SE(3) -> action prior, no images (20K steps)
+bash scripts/train_stage2.sh      # Stage 2: latent interface, from the Stage-1 checkpoint (30K steps)
+```
 
-Released as `pi05/baseline`, `pi05/lit_stage1` and `pi05/lit_stage2` (https://huggingface.co/linjianman/LIT);
-each is a LeRobot policy directory for `--policy.path`. `lit_stage2` is the model in the tables.
+Then evaluate `<run>/checkpoints/030000/pretrained_model` exactly as in §1. Reported checkpoints:
+baseline 030000, Stage 1 020000, LIT 030000.
 
-## The same method on other backbones
+`tools/probe_latent_attention.py` checks that the action expert actually reads the latents (attention mass
+on latent tokens vs. everything else) — the sanity check we ran before trusting any Stage-2 run.
 
-MolmoAct2 `jianmanlincjx/Molmoact2` · FAST-WAM `jianmanlincjx/fastwam` · ImageWAM `jianmanlincjx/ImageWAM`
+---
+
+## 3. How LIT is integrated in π0.5
+
+π0.5 is a mixture-of-transformers: the PaliGemma VLM and the action expert share one self-attention over a
+joint sequence, so "conditioning" is attention masking rather than a separate cross-attention path. That is
+exactly where LIT lives, in `src/pi05_goal_prior/`:
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Policy type | `configuration_pi05_goal_prior.py`, `modeling_pi05_goal_prior.py` | `PI05GoalPriorConfig/Policy`, registered as `pi05_goal_prior`; wraps stock π0.5 and adds the pieces below |
+| Firewall | attention mask in `modeling_pi05_goal_prior.py` | action-expert tokens cannot attend to image tokens (and, in Stage 1, to nothing visual at all); `mask_language_from_action_expert` additionally keeps language/state out of the action expert so vision reaches it only through the latents |
+| Latent interface | `goal_prior.py` (`_SelfAttentionBlock` latent stack) | 100 learnable latent tokens appended to the joint sequence; they attend to the VLM's image and text tokens, and the action expert attends to them |
+| Spatial supervision | `GoalPoseDecoder` in `goal_prior.py`, `lambda_pose = 0.3` | 8 of the latents are decoded to the chunk-end SE(3) target used in Stage 1 |
+| Stage-1 conditioning | `SE3Encoder` in `goal_prior.py` | encodes the terminal pose into tokens the action expert attends to while images are absent |
+| Trainer guard (optional) | `patches/` | skip an optimiser step on a non-finite or exploding gradient norm; never fired in any reported run |
+
+Interface settings match the other three backbones and were not tuned per model: `num_latents=100`,
+`num_pose_tokens=8`, `latent_dim=768`, `inner_dim=512`, `lambda_pose=0.3`.
