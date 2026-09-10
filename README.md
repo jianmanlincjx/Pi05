@@ -3,7 +3,7 @@
 The **Latent Interface Training (LIT)** instantiation of *Breaking the Vision–Action Shortcut: Latent
 Interface Training for Generalizable Robot Foundation Models* on π0.5.
 Hub, project page, checkpoints: https://github.com/jianmanlincjx/LIT · https://jianmanlincjx.github.io/LIT/ ·
-https://huggingface.co/linjianman/LIT
+https://huggingface.co/linjianman/LIT (public; Stage 1 and Stage 2 for every backbone)
 
 A small package on top of **upstream [LeRobot](https://github.com/huggingface/lerobot) 0.6.2**. Nothing under
 `lerobot/policies/pi05/` is patched — the baseline is stock π0.5 — this repository only adds the
@@ -73,6 +73,8 @@ bash scripts/train_baseline.sh    # stock pi05, 30K steps
 bash scripts/train_stage1.sh      # Stage 1: language + state + chunk-end SE(3) -> action prior, no images (20K steps)
 bash scripts/train_stage2.sh      # Stage 2: latent interface, from the Stage-1 checkpoint (30K steps)
 ```
+
+To skip Stage 1, point Stage 2 at the released prior: `STAGE1=./LIT_ckpt/pi05/lit_stage1 bash scripts/train_stage2.sh`.
 
 Then evaluate `<run>/checkpoints/030000/pretrained_model` exactly as in §1. Reported checkpoints:
 baseline 030000, Stage 1 020000, LIT 030000.
